@@ -5,7 +5,6 @@ import { Building2, LogOut, Users, DollarSign, BarChart2, Home, Plus, Eye, EyeOf
   ChevronRight, TrendingUp, TrendingDown, AlertCircle, Wallet, ClipboardList,
   Trash2, ChevronDown, ChevronUp, Timer, Play, Pause, CheckCircle2,
   Warehouse, Package, Search, ArrowUpCircle, ArrowDownCircle, X, Car, Bell } from "lucide-react";
-import { supabase, db } from './lib/db.js';
 
 const COMPANIES = {
   ubuntu:{ id:"ubuntu", name:"Ubuntu",             color:"#C2440A", bg:"linear-gradient(135deg,#E95420,#C2440A)", logo:"U", desc:"Constructora Ubuntu S.A. de C.V." },
@@ -52,7 +51,14 @@ const getE = o => (o.movimientos||[]).filter(m=>m.tipo==="egreso").reduce((s,m)=
 const getM = (i,e) => i>0?((i-e)/i)*100:0;
 const getU = (i,e) => i-e;
 
-// Storage manejado por Supabase — ver src/lib/db.js
+// ── STORAGE (persistencia 1-3 años) ─────────────────────────────────────────
+const stGet = async (key, def) => {
+  try { const r = await window.storage.get(key); return r ? JSON.parse(r.value) : def; }
+  catch { return def; }
+};
+const stSet = (key, val) => {
+  try { window.storage.set(key, JSON.stringify(val)); } catch {}
+};
 
 // ── COMPONENTES UI ────────────────────────────────────────────────────────────
 const Badge = ({text}) => {
@@ -1437,40 +1443,18 @@ function UsuariosView({users,setUsers,co}){
   const [err,setErr]=useState("");
   const list=users[co.id];
 
-  const [loading,setLoading]=useState(false);
-
-  const refreshUsers=async()=>{
-    const updated=await db.getCompanyUsers(co.id);
-    setUsers(p=>({...p,[co.id]:updated}));
-  };
-
-  const add=async()=>{
+  const add=()=>{
     if(!form.name||!form.email||!form.pw){setErr("Completa todos los campos.");return;}
-    setLoading(true);
-    try{
-      await db.createUser(form.email,form.pw,{name:form.name,role:form.role,companyId:co.id});
-      await refreshUsers();
-      setForm({name:"",email:"",pw:"",role:"administrativo"});setErr("");setShow(false);
-    }catch(e){
-      setErr(e.message||"Error al crear usuario.");
-    }
-    setLoading(false);
+    if(list.find(u=>u.email===form.email)){setErr("Ese correo ya existe.");return;}
+    setUsers(p=>({...p,[co.id]:[...p[co.id],{id:Date.now(),...form}]}));
+    setForm({name:"",email:"",pw:"",role:"administrativo"});setErr("");setShow(false);
   };
-
-  const startEdit=u=>{setEditId(u.id);setEditForm({name:u.name,email:u.email||"",role:u.role});setEditPw("");setErr("");setShow(false);};
-
-  const saveEdit=async()=>{
-    if(!editForm.name){setErr("El nombre es obligatorio.");return;}
-    setLoading(true);
-    try{
-      await db.updateProfile(editId,{name:editForm.name,role:editForm.role});
-      if(editPw) await db.updatePassword(editId,editPw);
-      await refreshUsers();
-      setEditId(null);setErr("");
-    }catch(e){
-      setErr(e.message||"Error al actualizar usuario.");
-    }
-    setLoading(false);
+  const startEdit=u=>{setEditId(u.id);setEditForm({name:u.name,email:u.email,role:u.role});setEditPw("");setErr("");setShow(false);};
+  const saveEdit=()=>{
+    if(!editForm.name||!editForm.email){setErr("Nombre y correo son obligatorios.");return;}
+    if(list.find(u=>u.email===editForm.email&&u.id!==editId)){setErr("Ese correo ya lo usa otro usuario.");return;}
+    setUsers(p=>({...p,[co.id]:p[co.id].map(u=>u.id===editId?{...u,...editForm,...(editPw?{pw:editPw}:{})}:u)}));
+    setEditId(null);setErr("");
   };
   const rBg={
     admin:"#EDE9FE", administrativo:"#E0F2FE",
@@ -2996,63 +2980,35 @@ export default function App(){
   const [storageLoaded,setStorageLoaded]=useState(false);
   const [isDesktop,setIsDesktop]=useState(()=>typeof window!=="undefined"?window.innerWidth>=768:true);
 
-  // ── Cargar datos desde Supabase + restaurar sesión ───────────────────────
+  // ── Cargar datos persistentes al iniciar ─────────────────────────────────
   useEffect(()=>{
     (async()=>{
-      // 1. Cargar datos globales de la app
-      const [o,c,n,p,b,vh]=await Promise.all([
-        db.loadData("portal_obras",        OBRAS_INIT),
-        db.loadData("portal_cuentas",      {ubuntu:[],sae:[]}),
-        db.loadData("portal_nominas",      {ubuntu:[],sae:[]}),
-        db.loadData("portal_productividad",{ubuntu:[],sae:[]}),
-        db.loadData("portal_bodegas",      {ubuntu:[],sae:[]}),
-        db.loadData("portal_vehiculos",    {ubuntu:[],sae:[]}),
+      const [o,c,n,p,b,u,vh,rec]=await Promise.all([
+        stGet("portal_obras", OBRAS_INIT),
+        stGet("portal_cuentas", {ubuntu:[],sae:[]}),
+        stGet("portal_nominas", {ubuntu:[],sae:[]}),
+        stGet("portal_productividad", {ubuntu:[],sae:[]}),
+        stGet("portal_bodegas", {ubuntu:[],sae:[]}),
+        stGet("portal_users", USERS_INIT),
+        stGet("portal_vehiculos", {ubuntu:[],sae:[]}),
+        stGet("portal_recordatorios", {}),
       ]);
       setObrasState(o); setCuentasState(c); setNominasState(n);
-      setProductividadState(p); setBodegasState(b); setVehiculosState(vh);
-
-      // 2. Cargar usuarios de ambas empresas desde Supabase
-      const [uu,su]=await Promise.all([
-        db.getCompanyUsers("ubuntu"),
-        db.getCompanyUsers("sae"),
-      ]);
-      setUsers({ubuntu:uu, sae:su});
-
-      // 3. Restaurar sesión activa si existe
-      const session=await db.getSession();
-      if(session){
-        const coData=COMPANIES[session.companyId];
-        if(coData){
-          setCo(coData);
-          setUser(session.user);
-          // Cargar recordatorios del usuario
-          const rec=await db.loadUserData(session.user.id, session.companyId, []);
-          const recK=`${session.companyId}_${session.user.id}`;
-          setRecordatoriosState({[recK]:rec});
-          const initView=
-            session.user.role==="admin"         ?"home":
-            session.user.role==="administrativo"?"obras":"cuentas";
-          setView(initView);
-          setScreen("dashboard");
-        }
-      }
+      setProductividadState(p); setBodegasState(b); setUsers(u); setVehiculosState(vh);
+      setRecordatoriosState(rec);
       setStorageLoaded(true);
     })();
   },[]);
 
-  // ── Guardar en Supabase cuando cambia cualquier estado ────────────────────
-  useEffect(()=>{ if(storageLoaded) db.saveData("portal_obras",obras); },[obras,storageLoaded]);
-  useEffect(()=>{ if(storageLoaded) db.saveData("portal_cuentas",cuentas); },[cuentas,storageLoaded]);
-  useEffect(()=>{ if(storageLoaded) db.saveData("portal_nominas",nominas); },[nominas,storageLoaded]);
-  useEffect(()=>{ if(storageLoaded) db.saveData("portal_productividad",productividad); },[productividad,storageLoaded]);
-  useEffect(()=>{ if(storageLoaded) db.saveData("portal_bodegas",bodegas); },[bodegas,storageLoaded]);
-  useEffect(()=>{ if(storageLoaded) db.saveData("portal_vehiculos",vehiculos); },[vehiculos,storageLoaded]);
-  // Recordatorios: guardar solo los del usuario activo
-  useEffect(()=>{
-    if(storageLoaded&&user&&co&&recKey&&recordatorios[recKey]!==undefined){
-      db.saveUserData(user.id, co.id, recordatorios[recKey]);
-    }
-  },[recordatorios,storageLoaded]);
+  // ── Guardar en storage cuando cambia cualquier estado (después de cargar) ─
+  useEffect(()=>{ if(storageLoaded) stSet("portal_obras",obras); },[obras,storageLoaded]);
+  useEffect(()=>{ if(storageLoaded) stSet("portal_cuentas",cuentas); },[cuentas,storageLoaded]);
+  useEffect(()=>{ if(storageLoaded) stSet("portal_nominas",nominas); },[nominas,storageLoaded]);
+  useEffect(()=>{ if(storageLoaded) stSet("portal_productividad",productividad); },[productividad,storageLoaded]);
+  useEffect(()=>{ if(storageLoaded) stSet("portal_bodegas",bodegas); },[bodegas,storageLoaded]);
+  useEffect(()=>{ if(storageLoaded) stSet("portal_vehiculos",vehiculos); },[vehiculos,storageLoaded]);
+  useEffect(()=>{ if(storageLoaded) stSet("portal_recordatorios",recordatorios); },[recordatorios,storageLoaded]);
+  useEffect(()=>{ if(storageLoaded) stSet("portal_users",users); },[users,storageLoaded]);
 
   useEffect(()=>{
     if(typeof window==="undefined")return;
@@ -3073,37 +3029,18 @@ export default function App(){
   const setRecordatorios=u=>setRecordatoriosState(p=>({...p,[recKey]:typeof u==="function"?u(p[recKey]||[]):(u||[])}));
 
   const selectCo=c=>{setCo(c);setLf({email:"",pw:""});setLerr("");setScreen("login");};
-
-  const login=async()=>{
-    setLerr("");
-    try{
-      const result=await db.signIn(lf.email,lf.pw);
-      if(result.companyId!==co.id){
-        setLerr("Este usuario pertenece a otra empresa.");
-        await db.signOut();
-        return;
-      }
-      const u=result.user;
-      // Cargar recordatorios del usuario recién autenticado
-      const rec=await db.loadUserData(u.id, co.id, []);
-      const recK=`${co.id}_${u.id}`;
-      setRecordatoriosState(prev=>({...prev,[recK]:rec}));
-      // Cargar lista actualizada de usuarios de su empresa
-      const companyUsers=await db.getCompanyUsers(co.id);
-      setUsers(prev=>({...prev,[co.id]:companyUsers}));
+  const login=()=>{
+    const u=users[co.id].find(u=>u.email===lf.email&&u.pw===lf.pw);
+    if(u){
       const initView=
-        u.role==="admin"         ?"home":
-        u.role==="administrativo"?"obras":"cuentas";
+        u.role==="admin"         ?"home"    :
+        u.role==="administrativo"?"obras"   :
+        "cuentas"; // logistica y operativo arrancan en Caja
       setUser(u);setView(initView);setScreen("dashboard");
-    }catch(e){
-      setLerr(e.message||"Correo o contraseña incorrectos.");
     }
+    else setLerr("Correo o contraseña incorrectos.");
   };
-
-  const logout=async()=>{
-    await db.signOut();
-    setUser(null);setCo(null);setScreen("landing");
-  };
+  const logout=()=>{setUser(null);setCo(null);setScreen("landing");};
   const isAdmin       = user?.role==="admin";
   const isAdmGeneral  = user?.role==="administrativo";
   const isLogistica   = user?.role==="logistica";
